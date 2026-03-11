@@ -1,2 +1,2 @@
-# MGLTools-Lite
-MGLTools Updating
+# MGLTools Lite
+Versión moderna y ligera para preparar PDBQT.

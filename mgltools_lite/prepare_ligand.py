@@ -39,30 +39,32 @@ def prepare_ligand(input_path, output_pdbqt):
     openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol)
 
     # ----------- TIPADO AD4 POR COORDENADAS ----------
-    # RDKit atom mapping by position
-    rd_coords = [(atom.GetIdx(), mol.GetConformer().GetAtomPosition(atom.GetIdx())) for atom in mol.GetAtoms()]
+    rd_coords = []
+    conf = mol.GetConformer()
+
+    for atom in mol.GetAtoms():
+        pos = conf.GetAtomPosition(atom.GetIdx())
+        rd_coords.append((atom.GetIdx(), pos.x, pos.y, pos.z))
 
     for ob_atom in openbabel.OBMolAtomIter(obmol):
-
-        # Buscar átomo RDKit más cercano por coordenadas
         ox, oy, oz = ob_atom.GetX(), ob_atom.GetY(), ob_atom.GetZ()
 
-        min_dist = 9999
+        # Encontrar átomo RDKit más cercano por coordenadas
         best_idx = None
+        best_dist = 1e9
 
-        for idx, pos in rd_coords:
-            d = (pos.x - ox)**2 + (pos.y - oy)**2 + (pos.z - oz)**2
-            if d < min_dist:
-                min_dist = d
+        for idx, x, y, z in rd_coords:
+            d = (x - ox)**2 + (y - oy)**2 + (z - oz)**2
+            if d < best_dist:
+                best_dist = d
                 best_idx = idx
 
         rd_atom = mol.GetAtomWithIdx(best_idx)
-        ad4_type = autodock_atom_type(rd_atom)
+        ad_type = autodock_atom_type(rd_atom)
 
-        ob_atom.SetType(ad4_type)
+        ob_atom.SetType(ad_type)
 
-    # Torsiones AutoDock
-    obmol.SetTorsionEnergy(obmol.NumRotors())
-
+    # ----------- EXPORTAR LIGANDO FINAL ------------
     conv.WriteFile(obmol, output_pdbqt)
+
     print(f"✔ Ligando PDBQT generado correctamente → {output_pdbqt}")

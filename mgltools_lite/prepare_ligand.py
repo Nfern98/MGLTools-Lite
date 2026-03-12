@@ -1,95 +1,81 @@
+import os
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit.Chem import rdDistGeom
+from rdkit.Chem.rdchem import Mol
 from openbabel import openbabel
-from .autodock_typing import autodock_atom_type
 
+def prepare_ligand(input_file, output_pdbqt):
+    print(f"[Ligando] Procesando: {input_file}")
 
-def prepare_ligand(input_path, output_pdbqt):
-    print(f"[Ligando] Procesando: {input_path}")
+    ext = os.path.splitext(input_file)[1].lower()
 
-    # =============================================================
-    # 1) Cargar PDB con OpenBabel → eliminar enlaces duplicados
-    # =============================================================
-    obmol = openbabel.OBMol()
-    conv = openbabel.OBConversion()
-    conv.SetInFormat("pdb")
-    conv.ReadFile(obmol, input_path)
+    # ------------------------------
+    # 1. Cargar con RDKit (lectura robusta)
+    # ------------------------------
+    if ext == ".sdf":
+        suppl = Chem.SDMolSupplier(input_file, removeHs=False)
+        mol = suppl[0] if suppl and suppl[0] else None
+    elif ext in [".mol2", ".mol"]:
+        mol = Chem.MolFromMol2File(input_file, removeHs=False)
+    elif ext == ".pdb":
+        mol = Chem.MolFromPDBFile(input_file, removeHs=False)
+    else:
+        raise ValueError("Formato no soportado")
 
-    # *** ESTA ES LA CLAVE ***
-    # Reparar conectividad sin usar CONECT duplicados
-    obmol.DeleteHydrogens()
-    obmol.ConnectTheDots()
-    obmol.PerceiveBondOrders()
-
-    # Guardar como MOL2
-    conv.SetOutFormat("mol2")
-    temp_mol2 = "temp_cleaned.mol2"
-    conv.WriteFile(obmol, temp_mol2)
-
-    # =============================================================
-    # 2) RDKit carga el MOL2 limpio y válido
-    # =============================================================
-    mol = Chem.MolFromMol2File(temp_mol2, removeHs=False)
     if mol is None:
-        raise ValueError(f"RDKit no pudo cargar el ligando: {input_path}")
+        print("⚠ RDKit no pudo cargar. Probando OpenBabel.")
+        mol = None
 
+    # ------------------------------
+    # 2. Si RDKit falla → intentar OpenBabel
+    # ------------------------------
+    if mol is None:
+        obc = openbabel.OBConversion()
+        obc.SetInFormat(ext.replace(".", ""))
+        obmol = openbabel.OBMol()
+        obc.ReadFile(obmol, input_file)
+
+        if obmol.NumAtoms() == 0:
+            raise ValueError(f"❌ ERROR: {input_file} está vacío o corrupto.")
+
+        # Convertir OBMol → RDKit
+        obc.SetOutFormat("mol")
+        temp_mol_file = "temp_ligand.mol"
+        obc.WriteFile(obmol, temp_mol_file)
+        mol = Chem.MolFromMolFile(temp_mol_file, removeHs=False)
+
+        if mol is None:
+            raise ValueError(f"❌ Fallo total al procesar {input_file}")
+
+    # ------------------------------
+    # 3. Reconstrucción de conectividad si falta
+    # ------------------------------
     mol = Chem.AddHs(mol)
 
-    # =============================================================
-    # 3) Generar conformación 3D segura
-    # =============================================================
-    result = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
-    if result != 0:
-        print("⚠ ETKDG falló, usando random embedding…")
-        AllChem.EmbedMolecule(mol, randomSeed=123)
-
+    # 3D embedding
+    params = rdDistGeom.ETKDGv3()
     try:
-        AllChem.MMFFOptimizeMolecule(mol)
+        AllChem.EmbedMolecule(mol, params)
     except:
-        AllChem.UFFOptimizeMolecule(mol)
+        print("⚠ Error embedding ETKDG, usando random coords")
+        AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
 
-    # =============================================================
-    # 4) Guardar como MOL para convertir a PDBQT
-    # =============================================================
-    temp_mol = "temp_ready.mol"
+    # Minimización
+    AllChem.MMFFOptimizeMolecule(mol)
+
+    # ------------------------------
+    # 4. Escribir MOL temporal y convertir a PDBQT con OpenBabel
+    # ------------------------------
+    temp_mol = "lig_temp.mol"
     Chem.MolToMolFile(mol, temp_mol)
 
-    # Cargar en OpenBabel para tipado
-    obmol2 = openbabel.OBMol()
-    conv.SetInAndOutFormats("mol", "pdbqt")
-    conv.ReadFile(obmol2, temp_mol)
+    obc = openbabel.OBConversion()
+    obc.SetInAndOutFormats("mol", "pdbqt")
+    obmol = openbabel.OBMol()
+    obc.ReadFile(obmol, temp_mol)
 
-    # Cargas Gasteiger
-    openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol2)
+    openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol)
 
-    # =============================================================
-    # 5) TIPADO AD4 por proximidad de coordenadas
-    # =============================================================
-    conf = mol.GetConformer()
-
-    rd_coords = []
-    for atom in mol.GetAtoms():
-        pos = conf.GetAtomPosition(atom.GetIdx())
-        rd_coords.append((atom.GetIdx(), pos.x, pos.y, pos.z))
-
-    for ob_atom in openbabel.OBMolAtomIter(obmol2):
-        ox, oy, oz = ob_atom.GetX(), ob_atom.GetY(), ob_atom.GetZ()
-
-        best_idx = None
-        best_dist = 1e9
-
-        for idx, x, y, z in rd_coords:
-            d = (x - ox)**2 + (y - oy)**2 + (z - oz)**2
-            if d < best_dist:
-                best_dist = d
-                best_idx = idx
-
-        rd_atom = mol.GetAtomWithIdx(best_idx)
-        ob_atom.SetType(autodock_atom_type(rd_atom))
-
-    # =============================================================
-    # 6) Exportar como PDBQT
-    # =============================================================
-    conv.WriteFile(obmol2, output_pdbqt)
-
-    print(f"✔ Ligando preparado correctamente → {output_pdbqt}")
+    obc.WriteFile(obmol, output_pdbqt)
+    print(f"✔ Ligando exportado: {output_pdbqt}")

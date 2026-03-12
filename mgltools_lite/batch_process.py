@@ -1,19 +1,17 @@
 import os
-from .prepare_receptor import prepare_receptor
 from .prepare_ligand import prepare_ligand
+from .prepare_receptor import prepare_receptor
 
-def process_all_ligands(input_folder, output_folder):
-    os.makedirs(output_folder, exist_ok=True)
-    for file in os.listdir(input_folder):
-        if file.lower().endswith(("pdb","mol2","sdf")):
-            in_file = os.path.join(input_folder, file)
-            out_file = os.path.join(output_folder, file.split('.')[0] + ".pdbqt")
-            prepare_ligand(in_file, out_file)
+def process_all_ligands(in_folder,out_folder):
+    os.makedirs(out_folder, exist_ok=True)
+    for f in os.listdir(in_folder):
+        if f.lower().endswith(('pdb','mol','mol2')):
+            prepare_ligand(os.path.join(in_folder,f),
+                           os.path.join(out_folder, f.split('.')[0]+'.pdbqt'))
 
-def process_all_receptors(input_folder, output_folder):
-    os.makedirs(output_folder, exist_ok=True)
-    for file in os.listdir(input_folder):
-        if file.lower().endswith("pdb"):
-            in_file = os.path.join(input_folder, file)
-            out_file = os.path.join(output_folder, file.split('.')[0] + ".pdbqt")
-            prepare_receptor(in_file, out_file)
+def process_all_receptors(in_folder,out_folder):
+    os.makedirs(out_folder, exist_ok=True)
+    for f in os.listdir(in_folder):
+        if f.lower().endswith('pdb'):
+            prepare_receptor(os.path.join(in_folder,f),
+                             os.path.join(out_folder, f.split('.')[0]+'.pdbqt'))

@@ -78,4 +78,4 @@ def prepare_ligand(input_file, output_pdbqt):
     openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol)
 
     obc.WriteFile(obmol, output_pdbqt)
-    print(f"✔ Ligando exportado: {output_pdbqt}")utput_pdbqt}")
+    print(f"✔ Ligando exportado: {output_pdbqt}")

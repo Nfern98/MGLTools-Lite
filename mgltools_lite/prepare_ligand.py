@@ -3,83 +3,88 @@ from rdkit.Chem import AllChem
 from openbabel import openbabel
 from .autodock_typing import autodock_atom_type, identify_hbond_roles
 
+
 def prepare_ligand(input_path, output_pdbqt):
     print(f"[Ligando] Procesando: {input_path}")
 
-    ext = input_path.lower()
-    mol = None
+    # ============================================================
+    # 1) Cargar el ligando SIEMPRE con OpenBabel primero
+    #    → Esto repara ligandos rotos, sin enlaces, o con PDB malo
+    # ============================================================
+    obmol = openbabel.OBMol()
+    conv = openbabel.OBConversion()
+    conv.SetInFormat("pdb")
+    if not conv.ReadFile(obmol, input_path):
+        raise ValueError(f"No se pudo leer el archivo PDB: {input_path}")
 
-    # -----------------------------
-    # 1. Cargar MOL/MOL2 directamente
-    # -----------------------------
-    if ext.endswith(".mol") or ext.endswith(".mol2"):
-        mol = Chem.MolFromMolFile(input_path, removeHs=False)
+    # Reconstruir conectividad
+    obmol.ConnectTheDots()
+    obmol.PerceiveBondOrders()
 
-    # -----------------------------
-    # 2. Si es PDB → RECONSTRUIR BONDS con OpenBabel
-    # -----------------------------
-    if mol is None and ext.endswith(".pdb"):
-        obmol = openbabel.OBMol()
-        conv = openbabel.OBConversion()
-        conv.SetInFormat("pdb")
-        conv.ReadFile(obmol, input_path)
+    # Guardar como MOL2 (incluye conectividad y tipos)
+    conv.SetOutFormat("mol2")
+    temp_mol2 = "temp_repaired.mol2"
+    conv.WriteFile(obmol, temp_mol2)
 
-        # Convertir a MOL2 (conectividad completa)
-        conv.SetOutFormat("mol2")
-        temp_mol2 = "temp_fixed.mol2"
-        conv.WriteFile(obmol, temp_mol2)
-
-        mol = Chem.MolFromMol2File(temp_mol2, removeHs=False)
-
+    # ============================================================
+    # 2) RDKit carga la molécula con conectividad correcta
+    # ============================================================
+    mol = Chem.MolFromMol2File(temp_mol2, removeHs=False)
     if mol is None:
-        raise ValueError(f"No se pudo cargar el ligando {input_path}")
+        raise ValueError(f"No se pudo cargar en RDKit: {input_path}")
 
-    # -----------------------------
-    # 3. Añadir hidrógenos
-    # -----------------------------
+    # Añadir hidrógenos
     mol = Chem.AddHs(mol)
 
-    # -----------------------------
-    # 4. Embedding seguro 3D
-    # -----------------------------
-    result = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
-    if result != 0:
-        print("⚠ Falló el embedding, intentando random...")
-        AllChem.EmbedMolecule(mol, randomSeed=0xF00D)
+    # ============================================================
+    # 3) EMBED MOLECULE + optimización segura
+    # ============================================================
+    res = AllChem.EmbedMolecule(mol, AllChem.ETKDG())
+    if res != 0:
+        print("⚠ Falló ETKDG, usando random embedding…")
+        AllChem.EmbedMolecule(mol, randomSeed=0xBEEF)
 
-    AllChem.MMFFOptimizeMolecule(mol)
+    try:
+        AllChem.MMFFOptimizeMolecule(mol)
+    except:
+        print("⚠ MMFF falló, optimizando con UFF…")
+        AllChem.UFFOptimizeMolecule(mol)
 
-    # -----------------------------
-    # 5. Escribir MOL temporal
-    # -----------------------------
-    temp_mol = "temp_clean.mol"
+    # ============================================================
+    # 4) Guardar como MOL temporal para OpenBabel
+    # ============================================================
+    temp_mol = "temp_final.mol"
     Chem.MolToMolFile(mol, temp_mol)
 
-    # -----------------------------
-    # 6. Convertir a OBMol para PDBQT
-    # -----------------------------
+    # ============================================================
+    # 5) Abrir con OpenBabel y asignar cargas + tipado AD4
+    # ============================================================
     conv.SetInAndOutFormats("mol", "pdbqt")
-    obmol = openbabel.OBMol()
-    conv.ReadFile(obmol, temp_mol)
+    obmol2 = openbabel.OBMol()
+    conv.ReadFile(obmol2, temp_mol)
 
-    openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol)
+    # Cargas Gasteiger
+    openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol2)
 
-    # -----------------------------
-    # 7. Tipado AD4 por coordenadas
-    # -----------------------------
-    rd_coords = []
+    # ============================================================
+    # 6) Tipado AD4 por coordenadas (robusto)
+    # ============================================================
     conf = mol.GetConformer()
+    rd_coords = [
+        (atom.GetIdx(),
+         conf.GetAtomPosition(atom.GetIdx()).x,
+         conf.GetAtomPosition(atom.GetIdx()).y,
+         conf.GetAtomPosition(atom.GetIdx()).z)
+        for atom in mol.GetAtoms()
+    ]
 
-    for atom in mol.GetAtoms():
-        pos = conf.GetAtomPosition(atom.GetIdx())
-        rd_coords.append((atom.GetIdx(), pos.x, pos.y, pos.z))
-
-    for ob_atom in openbabel.OBMolAtomIter(obmol):
+    for ob_atom in openbabel.OBMolAtomIter(obmol2):
         ox, oy, oz = ob_atom.GetX(), ob_atom.GetY(), ob_atom.GetZ()
 
         best_idx = None
         best_dist = 1e9
 
+        # buscar átomo más cercano
         for idx, x, y, z in rd_coords:
             d = (x - ox)**2 + (y - oy)**2 + (z - oz)**2
             if d < best_dist:
@@ -87,12 +92,12 @@ def prepare_ligand(input_path, output_pdbqt):
                 best_idx = idx
 
         rd_atom = mol.GetAtomWithIdx(best_idx)
-        ad_type = autodock_atom_type(rd_atom)
-        ob_atom.SetType(ad_type)
+        ad4 = autodock_atom_type(rd_atom)
+        ob_atom.SetType(ad4)
 
-    # -----------------------------
-    # 8. Guardar PDBQT final
-    # -----------------------------
-    conv.WriteFile(obmol, output_pdbqt)
+    # ============================================================
+    # 7) Guardar PDBQT final
+    # ============================================================
+    conv.WriteFile(obmol2, output_pdbqt)
 
-    print(f"✔ Ligando listo → {output_pdbqt}")
+    print(f"✔ Ligando preparado correctamente → {output_pdbqt}")

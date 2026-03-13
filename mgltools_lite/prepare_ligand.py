@@ -1,81 +1,48 @@
 import os
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit.Chem import rdDistGeom
-from rdkit.Chem.rdchem import Mol
 from openbabel import openbabel
 
 def prepare_ligand(input_file, output_pdbqt):
-    print(f"[Ligando] Procesando: {input_file}")
-
-    ext = os.path.splitext(input_file)[1].lower()
-
-    # ------------------------------
-    # 1. Cargar con RDKit (lectura robusta)
-    # ------------------------------
-    if ext == ".sdf":
-        suppl = Chem.SDMolSupplier(input_file, removeHs=False)
-        mol = suppl[0] if suppl and suppl[0] else None
-    elif ext in [".mol2", ".mol"]:
-        mol = Chem.MolFromMol2File(input_file, removeHs=False)
-    elif ext == ".pdb":
-        mol = Chem.MolFromPDBFile(input_file, removeHs=False)
-    else:
-        raise ValueError("Formato no soportado")
-
-    if mol is None:
-        print("⚠ RDKit no pudo cargar. Probando OpenBabel.")
-        mol = None
-
-    # ------------------------------
-    # 2. Si RDKit falla → intentar OpenBabel
-    # ------------------------------
-    if mol is None:
-        obc = openbabel.OBConversion()
-        obc.SetInFormat(ext.replace(".", ""))
-        obmol = openbabel.OBMol()
-        obc.ReadFile(obmol, input_file)
-
-        if obmol.NumAtoms() == 0:
-            raise ValueError(f"❌ ERROR: {input_file} está vacío o corrupto.")
-
-        # Convertir OBMol → RDKit
-        obc.SetOutFormat("mol")
-        temp_mol_file = "temp_ligand.mol"
-        obc.WriteFile(obmol, temp_mol_file)
-        mol = Chem.MolFromMolFile(temp_mol_file, removeHs=False)
-
-        if mol is None:
-            raise ValueError(f"❌ Fallo total al procesar {input_file}")
-
-    # ------------------------------
-    # 3. Reconstrucción de conectividad si falta
-    # ------------------------------
-    mol = Chem.AddHs(mol)
-
-    # 3D embedding
-    params = rdDistGeom.ETKDGv3()
-    try:
-        AllChem.EmbedMolecule(mol, params)
-    except:
-        print("⚠ Error embedding ETKDG, usando random coords")
-        AllChem.EmbedMolecule(mol, randomSeed=0xf00d)
-
-    # Minimización
-    AllChem.MMFFOptimizeMolecule(mol)
-
-    # ------------------------------
-    # 4. Escribir MOL temporal y convertir a PDBQT con OpenBabel
-    # ------------------------------
-    temp_mol = "lig_temp.mol"
-    Chem.MolToMolFile(mol, temp_mol)
-
+    ext = os.path.splitext(input_file)[1][1:].lower()
     obc = openbabel.OBConversion()
-    obc.SetInAndOutFormats("mol", "pdbqt")
-    obmol = openbabel.OBMol()
-    obc.ReadFile(obmol, temp_mol)
 
-    openbabel.OBChargeModel.FindType("gasteiger").ComputeCharges(obmol)
+    if ext in ["pdb", "mol2", "sdf"]:
+        obc.SetInAndOutFormats(ext, "pdbqt")
+    else:
+        raise ValueError(f"Formato no soportado: {ext}")
 
-    obc.WriteFile(obmol, output_pdbqt)
-    print(f"✔ Ligando exportado: {output_pdbqt}")
+    mol = openbabel.OBMol()
+    print(f"[1/5] Cargando ligando: {input_file}")
+    obc.ReadFile(mol, input_file)
+
+    print(f"  → Átomos: {mol.NumAtoms()}")
+    print(f"  → Conformers: {mol.NumConformers()}")
+
+    # 2) Agregar hidrógenos
+    print("[2/5] Agregando hidrógenos...")
+    mol.AddHydrogens()
+
+    # 3) Detectar si REALMENTE faltan coordenadas
+    coords_missing = False
+    for atom in openbabel.OBMolAtomIter(mol):
+        x, y, z = atom.GetX(), atom.GetY(), atom.GetZ()
+        if abs(x) < 1e-6 and abs(y) < 1e-6 and abs(z) < 1e-6:
+            coords_missing = True
+            break
+
+    if coords_missing:
+        print("[3/5] Faltan coordenadas → generando estructura 3D...")
+        builder = openbabel.OBBuilder()
+        builder.Build(mol)
+    else:
+        print("[3/5] Coordenadas correctas → NO se reconstruye el conformer")
+
+    # 4) Cargas Gasteiger
+    print("[4/5] Calculando cargas Gasteiger...")
+    charge = openbabel.OBChargeModel.FindType("gasteiger")
+    charge.ComputeCharges(mol)
+
+    # 5) Exportar
+    print("[5/5] Escribiendo PDBQT...")
+    obc.WriteFile(mol, output_pdbqt)
+
+    print(f"✔ Ligando preparado sin errores: {output_pdbqt}")
